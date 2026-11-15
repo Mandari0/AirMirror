@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.manifest
+
+# Installer output
+installer/*.exe
+installer/*.bin
+installer/*.tmp
+
+# Local runtime data and logs
+settings.json
+uxplay.log
+tray-error.log
+nowplaying.txt
+coverart.bin
+
+# Backups and archives
+.backup/
+*.zip
+*.7z
+*.rar
+
+# Internal developer notes (not part of the public repository)
+NOTES.md
+
+# UxPlay build tree (source is tracked under third_party/uxplay)
+third_party/uxplay/build/
+
+# Editors and OS files
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

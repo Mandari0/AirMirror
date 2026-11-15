@@ -1,0 +1,81 @@
+--- a/lib/mdnsd/mdnsd.c
++++ b/lib/mdnsd/mdnsd.c
+@@ -349,6 +349,15 @@
+ {
+     uint32_t addr = 0;
+ #ifdef _WIN32
++    {
++        const char *forced_addr = getenv("UXPLAY_MDNS_ADDR");
++        if (forced_addr && *forced_addr) {
++            struct in_addr forced;
++            if (inet_pton(AF_INET, forced_addr, &forced) == 1) {
++                return forced.s_addr;
++            }
++        }
++    }
+     ULONG buflen = 15000;
+     PIP_ADAPTER_ADDRESSES pAddresses = NULL;
+     DWORD dwRetVal = 0;
+@@ -369,20 +378,42 @@
+     
+     if (dwRetVal == NO_ERROR) {
+         PIP_ADAPTER_ADDRESSES pCurr = pAddresses;
++        int best_score = -1;
+         while (pCurr) {
+-            // Precise target filters to bypass the Hyper-V virtual adapter loopback capture
+-            if (pCurr->OperStatus == IfOperStatusUp && 
++            // Precise target filters to bypass the Hyper-V virtual adapter loopback capture,
++            // and also skip VPN/tunnel adapters (Tailscale, Radmin VPN, Wintun, ZeroTier, ...)
++            // which are never reachable from AirPlay clients on the local network.
++            if (pCurr->OperStatus == IfOperStatusUp &&
+                 pCurr->IfType != IF_TYPE_SOFTWARE_LOOPBACK &&
+-                pCurr->FirstGatewayAddress != NULL && 
++                pCurr->FirstGatewayAddress != NULL &&
++                pCurr->FirstUnicastAddress != NULL &&
+                 wcsstr(pCurr->Description, L"Hyper-V") == NULL &&
+                 wcsstr(pCurr->Description, L"Virtual") == NULL &&
+                 wcsstr(pCurr->Description, L"WSL") == NULL &&
+-                wcsstr(pCurr->Description, L"vEthernet") == NULL) {
+-                
+-                if (pCurr->FirstUnicastAddress != NULL) {
+-                    struct sockaddr_in *sockaddr_ipv4 = (struct sockaddr_in *)pCurr->FirstUnicastAddress->Address.lpSockaddr;
+-                    addr = sockaddr_ipv4->sin_addr.s_addr;
+-                    break; 
++                wcsstr(pCurr->Description, L"vEthernet") == NULL &&
++                wcsstr(pCurr->Description, L"VPN") == NULL &&
++                wcsstr(pCurr->Description, L"Tunnel") == NULL &&
++                wcsstr(pCurr->Description, L"Tailscale") == NULL &&
++                wcsstr(pCurr->Description, L"Radmin") == NULL &&
++                wcsstr(pCurr->Description, L"Wintun") == NULL &&
++                wcsstr(pCurr->Description, L"ZeroTier") == NULL &&
++                wcsstr(pCurr->Description, L"TAP-") == NULL) {
++
++                struct sockaddr_in *unicast = (struct sockaddr_in *)pCurr->FirstUnicastAddress->Address.lpSockaddr;
++                struct sockaddr_in *gateway = (struct sockaddr_in *)pCurr->FirstGatewayAddress->Address.lpSockaddr;
++                int score = 1;
++
++                if (gateway->sin_addr.s_addr != 0) {
++                    score += 2;                            /* has a real gateway */
++                }
++                if (pCurr->IfType == IF_TYPE_ETHERNET_CSMACD) {
++                    score += 4;                            /* prefer wired LAN */
++                } else if (pCurr->IfType == IF_TYPE_IEEE80211) {
++                    score += 3;                            /* then Wi-Fi */
++                }
++                if (score > best_score) {
++                    best_score = score;
++                    addr = unicast->sin_addr.s_addr;
+                 }
+             }
+             pCurr = pCurr->Next;
+@@ -412,8 +443,8 @@
+ 
+     CLOSESOCKET(fd);
+ #endif
+-    //printf("local ipv4 address %d.%d.%d.%d\n",  (addr & 0xff), ((addr >> 8) & 0xff),
+-    //       ((addr >> 16) & 0xff),((addr >> 24) & 0xff));
++    printf("mDNS: using local ipv4 address %d.%d.%d.%d\n",  (addr & 0xff), ((addr >> 8) & 0xff),
++           ((addr >> 16) & 0xff),((addr >> 24) & 0xff));
+     
+     return addr;
+ }
