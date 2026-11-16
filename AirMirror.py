@@ -782,7 +782,7 @@ class Tooltip:
                            highlightthickness=0, bd=0)
             cv.pack()
             photo = rounded_photo(width, height, 7, self.c["card"],
-                                  self.c["border"], 1)
+                                  self.c["border"], 1, key=key)
             cv.create_image(0, 0, anchor="nw", image=photo)
             cv.image = photo
             cv.create_text(width / 2, height / 2, text=self.text,
@@ -1003,7 +1003,7 @@ class NowPlayingWindow:
         cw = max(inner_w + 2 * self.RING, self.WIDTH)
         ch = inner_h + 2 * self.RING
         self.shell.configure(width=cw, height=ch)
-        photo = rounded_photo(cw, ch, 14, c["card"], c["border"], 1)
+        photo = rounded_photo(cw, ch, 14, c["card"], c["border"], 1, key=self.KEY)
         self.shell.create_image(0, 0, anchor="nw", image=photo)
         self.shell.image = photo
         self.shell.create_window(self.RING, self.RING, anchor="nw", window=card,
@@ -1370,13 +1370,20 @@ def round_poly(canvas, x1, y1, x2, y2, r, **kw):
 _ROUND_CACHE = {}
 
 
-def rounded_photo(w, h, radius, fill, outline=None, border=1):
-    """Anti-aliased rounded rectangle (supersampled) for crisp 1px borders."""
+def rounded_photo(w, h, radius, fill, outline=None, border=1, key=None):
+    """Anti-aliased rounded rectangle (supersampled) for crisp 1px borders.
+
+    Pass ``key`` when the image goes into a colour-keyed window
+    (``-transparentcolor``): Windows only hides pixels that match the key
+    exactly, so the soft edge is snapped to the real silhouette and flattened
+    onto the outline colour.  Otherwise the half-transparent anti-aliasing ring
+    stays visible as dark speckles around the rounded corners.
+    """
     from PIL import Image, ImageDraw, ImageTk
 
     w, h, radius = int(w), int(h), int(radius)
-    key = (w, h, radius, fill, outline, border)
-    photo = _ROUND_CACHE.get(key)
+    cache_key = (w, h, radius, fill, outline, border, key)
+    photo = _ROUND_CACHE.get(cache_key)
     if photo is not None:
         return photo
     if len(_ROUND_CACHE) > 200:
@@ -1395,8 +1402,22 @@ def rounded_photo(w, h, radius, fill, outline=None, border=1):
         )
     else:
         draw.rounded_rectangle(box, radius=radius * s, fill=fill)
-    photo = ImageTk.PhotoImage(img.resize((w, h), Image.LANCZOS))
-    _ROUND_CACHE[key] = photo
+
+    img = img.resize((w, h), Image.LANCZOS)
+    if key is not None:
+        edge = (outline or fill).lstrip("#")
+        edge = tuple(int(edge[i:i + 2], 16) for i in (0, 2, 4))
+        spot = key.lstrip("#")
+        spot = tuple(int(spot[i:i + 2], 16) for i in (0, 2, 4))
+        mask = img.getchannel("A").point(lambda a: 255 if a >= 128 else 0)
+        flat = Image.alpha_composite(
+            Image.new("RGBA", (w, h), edge + (255,)), img
+        )
+        img = Image.composite(
+            flat, Image.new("RGBA", (w, h), spot + (255,)), mask
+        ).convert("RGB")
+    photo = ImageTk.PhotoImage(img)
+    _ROUND_CACHE[cache_key] = photo
     return photo
 
 
@@ -1565,6 +1586,7 @@ class RoundSelect(tk.Canvas):
         self.popup = None
         self.popup_anim = None
         self._hover_index = None
+        self._suppress_toggle = False
         self.bind("<Button-1>", self._toggle)
         self.bind("<Enter>", lambda _e: self._hover(True))
         self.bind("<Leave>", lambda _e: self._hover(False))
@@ -1608,8 +1630,35 @@ class RoundSelect(tk.Canvas):
     def _toggle(self, _event=None):
         if self.popup is not None:
             self._close_popup()
-        else:
-            self._open_popup()
+            return
+        if self._suppress_toggle:
+            # this very click already closed the list via <FocusOut>
+            self._suppress_toggle = False
+            return
+        self._open_popup()
+
+    def _popup_focus_out(self, _event=None):
+        """Close the list when the popup loses focus.
+
+        Clicking the select while its list is open moves focus away from the
+        popup *before* the click reaches the canvas.  Without the flag the list
+        would close here and immediately reopen in ``_toggle``.
+        """
+        if self.popup is None:
+            return
+        try:
+            px, py = self.winfo_pointerxy()
+            widget = self.winfo_containing(px, py)
+            on_self = widget is not None and str(widget).startswith(str(self))
+        except Exception:
+            on_self = False
+        if on_self:
+            self._suppress_toggle = True
+            self.after(250, self._clear_suppress)
+        self._close_popup()
+
+    def _clear_suppress(self):
+        self._suppress_toggle = False
 
     def _root_click(self, event):
         """Close the list when the user clicks anywhere else in the window."""
@@ -1657,14 +1706,15 @@ class RoundSelect(tk.Canvas):
                        highlightthickness=0, bd=0)
         cv.pack()
         self._popup_canvas = cv
-        self._card_photo = rounded_photo(w, h, 10, c["card"], c["border"], 1)
+        self._card_photo = rounded_photo(w, h, 10, c["card"], c["border"], 1,
+                                         key=key)
         cv.create_image(0, 0, anchor="nw", image=self._card_photo)
         self._draw_items()
 
         cv.bind("<Motion>", self._pop_motion)
         cv.bind("<Button-1>", self._pop_click)
         top.bind("<Escape>", lambda _e: self._close_popup())
-        top.bind("<FocusOut>", lambda _e: self._close_popup())
+        top.bind("<FocusOut>", self._popup_focus_out)
 
         top.geometry(f"{w}x{h}+{x}+{y}")
         top.deiconify()
@@ -1974,7 +2024,7 @@ class SettingsWindow:
 
         lang_select = RoundSelect(
             head, [label for _code, label in LANGUAGES], self.var_lang, c,
-            width=118, height=30,
+            width=118, height=30, bg=c["bg"],
         )
         self.lang_select = lang_select
         lang_select.pack(side="right", padx=(12, 0), pady=(2, 0))

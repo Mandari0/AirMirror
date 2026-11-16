@@ -33,7 +33,7 @@ if not exist "%ISCC%" (
 if errorlevel 1 goto :fail
 
 echo.
-echo DONE: installer\AirMirror-Setup-1.0.0.exe
+echo DONE: installer\AirMirror-Setup-1.0.1.exe
 goto :eof
 
 :fail

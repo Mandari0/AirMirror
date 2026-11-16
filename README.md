@@ -37,7 +37,7 @@ local network.
 
 ## Install
 
-1. Download `AirMirror-Setup-1.0.0.exe` from [Releases](../../releases).
+1. Download `AirMirror-Setup-1.0.1.exe` from [Releases](../../releases).
 2. Run the installer. It asks for administrator rights once and installs to
    `C:\Program Files\AirMirror`.
 3. The installer creates an inbound firewall rule for `uxplay.exe` and optional
@@ -140,7 +140,7 @@ bash build-portable.sh
 ```
 
 Finally compile `installer.iss` with Inno Setup 6 (or run `ISCC.exe installer.iss`).
-The result is `installer\AirMirror-Setup-1.0.0.exe`.
+The result is `installer\AirMirror-Setup-1.0.1.exe`.
 
 The portable bundle is written to `build\portable\uxplay` and the frozen app to
 `dist\AirMirror`.
