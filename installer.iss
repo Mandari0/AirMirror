@@ -1,6 +1,6 @@
 ﻿; Inno Setup script for AirMirror - AirPlay receiver for Windows (UxPlay + tray front-end)
 #define AppName "AirMirror"
-#define AppVersion "1.0.1"
+#define AppVersion "1.1.0"
 #define AppPublisher "AirMirror"
 #define AppExe "AirMirror.exe"
 
@@ -40,8 +40,8 @@ english.AutostartGroup=Autostart:
 russian.AutostartGroup=Автозапуск:
 english.SettingsShortcut=Settings
 russian.SettingsShortcut=Настройки
-english.DesktopShortcut=AirMirror (iPhone to PC)
-russian.DesktopShortcut=AirMirror (iPhone to PC)
+english.DesktopShortcut=AirMirror
+russian.DesktopShortcut=AirMirror
 english.UninstallShortcut=Uninstall {#AppName}
 russian.UninstallShortcut=Удалить {#AppName}
 english.FirewallStatus=Configuring Windows Firewall...

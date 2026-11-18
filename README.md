@@ -17,6 +17,9 @@ local network.
 - **Screen mirroring** — the mirroring window appears only when a device connects.
 - **Mini player** — artwork, track, artist, album and progress for AirPlay audio,
   with an “Always on top” pin and a Windows 11-style close button.
+- **Adaptive player backdrop** — the card is tinted by the album cover, with
+  slowly drifting glows that cross-fade between tracks; can be turned off in
+  Settings.
 - **Quality controls** — resolution, frame rate and audio/video sync.
 - **Bilingual UI** — English (default) and Russian, switchable in Settings.
 - **Autostart** — optional “Start with Windows”.
@@ -37,7 +40,7 @@ local network.
 
 ## Install
 
-1. Download `AirMirror-Setup-1.0.1.exe` from [Releases](../../releases).
+1. Download `AirMirror-Setup-1.1.0.exe` from [Releases](../../releases).
 2. Run the installer. It asks for administrator rights once and installs to
    `C:\Program Files\AirMirror`.
 3. The installer creates an inbound firewall rule for `uxplay.exe` and optional
@@ -73,6 +76,7 @@ Right-click the tray icon → **Settings**.
 | Send audio | Turn off if you only need the screen. |
 | Full screen on connect | The mirroring window fills the screen right away. |
 | Mini player for music | Show the now-playing card during AirPlay audio. |
+| Animated backdrop | Tint the mini player with the album art and gently animate it. |
 | Start with Windows | Add AirMirror to `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. |
 | Language | English or Russian. Applied after saving. |
 
@@ -88,6 +92,8 @@ duration. It has no taskbar button and does not steal focus.
 - The close button hides the card until the next track.
 - The card hides automatically when audio stops or screen mirroring starts.
 - Its position is remembered between tracks.
+- The backdrop follows the cover art: it fades between tracks and drifts slowly.
+  Turn it off with **Animated backdrop** in Settings for the flat card.
 
 ## Data and logs
 
@@ -140,7 +146,7 @@ bash build-portable.sh
 ```
 
 Finally compile `installer.iss` with Inno Setup 6 (or run `ISCC.exe installer.iss`).
-The result is `installer\AirMirror-Setup-1.0.1.exe`.
+The result is `installer\AirMirror-Setup-1.1.0.exe`.
 
 The portable bundle is written to `build\portable\uxplay` and the frozen app to
 `dist\AirMirror`.

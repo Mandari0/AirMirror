@@ -81,6 +81,7 @@ DEFAULTS = {
     "audio": True,
     "fullscreen": False,
     "now_playing": True,
+    "animated_backdrop": True,
     "always_on_top": False,
     "language": "en",
 }
@@ -143,6 +144,10 @@ STRINGS = {
     "now_playing_title": {"en": "Mini player for music", "ru": "Мини-плеер для музыки"},
     "now_playing_hint": {"en": "track, artwork and progress for AirPlay audio",
                          "ru": "трек, обложка и прогресс при AirPlay-аудио"},
+    "animated_backdrop_title": {"en": "Animated player background",
+                                "ru": "Анимированный фон плеера"},
+    "animated_backdrop_hint": {"en": "cover colours slowly drift behind the mini player",
+                               "ru": "цвета обложки плавно переливаются за мини-плеером"},
     "sync_title": {"en": "Audio and video sync", "ru": "Синхронизация аудио и видео"},
     "sync_hint": {"en": "precise sync, slightly higher latency",
                   "ru": "точная синхронизация, но чуть выше задержка"},
@@ -792,101 +797,293 @@ class Tooltip:
             self._hide()
 
 
-class MiniButton(tk.Canvas):
-    """Round icon button for the player header (close / always on top)."""
+_PALETTE_CACHE = {}
 
-    def __init__(self, parent, colors, kind, command, size=26, bg=None):
-        super().__init__(
-            parent, width=size, height=size, bg=bg or colors["card"],
-            highlightthickness=0, bd=0, cursor="hand2",
-        )
-        self.c = colors
-        self.kind = kind
-        self.size = size
-        self.command = command
-        self.hover = 0.0
-        self.active = False
-        self.pressed = False
-        self.anim = Animator(self)
-        self.bind("<Enter>", lambda _e: self._fade(True))
-        self.bind("<Leave>", lambda _e: self._fade(False))
-        self.bind("<ButtonPress-1>", self._press)
-        self.bind("<ButtonRelease-1>", self._release)
-        self._draw()
+FALLBACK_PALETTE = ("#3d4a63", "#54405c", "#2f3d4a")
 
-    def _draw(self):
-        self.delete("all")
-        c = self.c
-        s = self.size
-        if self.kind == "close":
-            if self.hover > 0.01:
-                photo = rounded_photo(s, s, s // 2,
-                                      blend(c["card"], "#c42b1c", self.hover))
-                self.create_image(0, 0, anchor="nw", image=photo)
-                self._photo = photo
-            col = "#ffffff" if self.hover > 0.5 else c["muted"]
-            m = s * 0.33
-            self.create_line(m, m, s - m, s - m, fill=col, width=2, capstyle="round")
-            self.create_line(s - m, m, m, s - m, fill=col, width=2, capstyle="round")
-            return
 
-        # "always on top": a small window with a filled title strip
-        if self.active:
-            photo = rounded_photo(s, s, s // 2, c["accent"])
-            self.create_image(0, 0, anchor="nw", image=photo)
-            self._photo = photo
-            col = "#ffffff"
+def _hex_to_rgb(value):
+    value = value.lstrip("#")
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _rgb_to_hex(rgb):
+    return "#%02x%02x%02x" % tuple(max(0, min(255, int(v))) for v in rgb)
+
+
+def _boost_color(rgb, sat=1.6, val=0.62):
+    """Push a cover colour into a saturated but backdrop-safe range."""
+    import colorsys
+
+    r, g, b = [v / 255.0 for v in rgb]
+    hue, saturation, _value = colorsys.rgb_to_hsv(r, g, b)
+    saturation = min(1.0, saturation * sat + 0.10)
+    return tuple(int(round(x * 255))
+                 for x in colorsys.hsv_to_rgb(hue, saturation, val))
+
+
+def cover_palette(count=3):
+    """Dominant colours of the current cover art, tuned for a dark backdrop."""
+    import colorsys
+    from io import BytesIO
+
+    from PIL import Image
+
+    try:
+        size = COVERART_FILE.stat().st_size
+    except OSError:
+        return list(FALLBACK_PALETTE[:count])
+    if size < 600:  # 1x1 placeholder UxPlay writes at startup
+        return list(FALLBACK_PALETTE[:count])
+
+    key = (file_mtime(COVERART_FILE), size)
+    cached = _PALETTE_CACHE.get(key)
+    if cached is not None:
+        return list(cached)
+
+    try:
+        img = Image.open(BytesIO(COVERART_FILE.read_bytes())).convert("RGB")
+        img.thumbnail((90, 90))
+        quant = img.quantize(colors=12, method=Image.MEDIANCUT)
+        table = quant.getpalette()
+        scored = []
+        for amount, index in sorted(quant.getcolors(), reverse=True):
+            r, g, b = table[index * 3:index * 3 + 3]
+            top, low = max(r, g, b), min(r, g, b)
+            if top < 34 or low > 235:  # near black / near white
+                continue
+            saturation = (top - low) / top if top else 0.0
+            if saturation < 0.10:  # greys make a muddy backdrop
+                continue
+            scored.append((amount * (0.35 + saturation), (r, g, b)))
+        scored.sort(key=lambda item: item[0], reverse=True)
+    except Exception:
+        return list(FALLBACK_PALETTE[:count])
+
+    colors = []
+    for _score, rgb in scored:
+        hue = colorsys.rgb_to_hsv(*[v / 255.0 for v in rgb])[0]
+        if any(abs(hue - colorsys.rgb_to_hsv(*[v / 255.0 for v in other])[0]) < 0.07
+               for other in colors):
+            continue
+        colors.append(_boost_color(rgb))
+        if len(colors) >= count:
+            break
+    if not colors:
+        colors = [_hex_to_rgb(color) for color in FALLBACK_PALETTE[:count]]
+    while len(colors) < count:
+        colors.append(colors[-1])
+
+    result = [_rgb_to_hex(color) for color in colors]
+    if len(_PALETTE_CACHE) > 8:
+        _PALETTE_CACHE.clear()
+    _PALETTE_CACHE[key] = result
+    return list(result)
+
+
+class PlayerBackdrop:
+    """Slowly drifting gradient tinted by the cover art.
+
+    Rendered at half resolution (the blobs are soft, nobody can tell) and
+    masked to the rounded card so the colour-key window keeps clean edges.
+    """
+
+    SCALE = 2          # render at half resolution, then upscale
+    FADE = 0.55        # seconds for a palette cross-fade
+    INTENSITY = 0.40   # glow brightness
+    RADIUS = 0.70      # blob radius as a fraction of the card width
+    VIGNETTE = 88      # edge darkening (0..255 of multiply)
+    SCRIM = (0.30, 0.80)  # darken the text side: (start fraction, edge factor)
+    BLOBS = (
+        (0.34, 0.30, 23.0, 0.0),
+        (0.30, 0.34, 31.0, 2.1),
+        (0.24, 0.22, 41.0, 4.3),
+    )
+
+    def __init__(self, width, height, radius, key, border, dark=True):
+        from PIL import Image, ImageChops, ImageDraw
+
+        self.w, self.h = width, height
+        self.dark = dark
+        self.rw = max(2, width // self.SCALE)
+        self.rh = max(2, height // self.SCALE)
+        self.key = _hex_to_rgb(key)
+
+        mask = Image.new("L", (width, height), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, width - 1, height - 1], radius=radius, fill=255)
+        self.mask = mask
+        self.key_img = Image.new("RGB", (width, height), self.key)
+
+        layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).rounded_rectangle(
+            [0, 0, width - 1, height - 1], radius=radius,
+            outline=_hex_to_rgb(border) + (255,), width=1)
+        self.border_layer = layer
+
+        grad = Image.radial_gradient("L").resize((self.rw, self.rh), Image.BILINEAR)
+        amount = self.VIGNETTE if dark else 30
+        shade = grad.point(lambda v: int(255 - (v / 255.0) ** 1.4 * amount))
+        self.vignette = Image.merge("RGB", (shade, shade, shade))
+
+        start, edge = self.SCRIM if dark else (0.30, 1.0)
+        band = Image.new("L", (self.rw, 1))
+        put = band.load()
+        x0 = int(self.rw * start)
+        for x in range(self.rw):
+            if x <= x0:
+                put[x, 0] = 255
+            else:
+                t = (x - x0) / max(1, self.rw - 1 - x0)
+                put[x, 0] = int(255 * (1 + (edge - 1) * t))
+        band = band.resize((self.rw, self.rh), Image.BILINEAR)
+        self.scrim = Image.merge("RGB", (band, band, band))
+        self.shade = ImageChops.multiply(self.vignette, self.scrim)
+
+        self.radius = max(8, int(max(self.rw, self.rh) * self.RADIUS))
+        self.falloff = self._make_falloff()
+        self.colors = [(60.0, 60.0, 70.0)] * 3
+        self.target = list(self.colors)
+        self.base = (14.0, 14.0, 16.0) if dark else (246.0, 246.0, 248.0)
+        self.base_target = self.base
+        self.t = 0.0
+        self._glows = None
+
+    def _make_falloff(self):
+        """Soft round mask that fades to zero at the sprite edge.
+
+        ``Image.radial_gradient`` only reaches white in the square corners,
+        so a naive falloff leaves ~10 levels of glow at the sprite border and
+        the four straight edges show up as moving seams.  Normalising by the
+        inscribed circle keeps the blob round and seam-free.
+        """
+        from PIL import Image
+
+        r = self.radius
+        grad = Image.radial_gradient("L").resize((2 * r, 2 * r), Image.BILINEAR)
+        return grad.point(lambda v: int(max(0.0, 1.0 - v * 0.0055473) ** 2.0 * 255))
+
+    def set_palette(self, colors, instant=False):
+        target = [_hex_to_rgb(color) for color in colors[:3]]
+        while len(target) < 3:
+            target.append(target[-1])
+        self.target = [tuple(float(v) for v in color) for color in target]
+        dom = target[0]
+        if self.dark:
+            self.base_target = tuple(12.0 + (dom[i] - 12.0) * 0.10
+                                     for i in range(3))
         else:
-            if self.hover > 0.01:
-                photo = rounded_photo(s, s, s // 2,
-                                      blend(c["card"], c["hover"], self.hover))
-                self.create_image(0, 0, anchor="nw", image=photo)
-                self._photo = photo
-            col = c["fg"] if self.hover > 0.5 else c["muted"]
-        x1, y1, x2, y2 = 6, 7, s - 6, s - 7
-        self.create_rectangle(x1, y1, x2, y2, outline=col, width=1)
-        self.create_rectangle(x1 + 1, y1 + 1, x2 - 1, y1 + 5, fill=col, outline="")
+            self.base_target = tuple(246.0 + (dom[i] - 246.0) * 0.06
+                                     for i in range(3))
+        if instant:
+            self.colors = [tuple(color) for color in self.target]
+            self.base = tuple(self.base_target)
+            self._glows = None
 
-    def _fade(self, state):
-        target = 1.0 if state else 0.0
-        start = self.hover
+    def _build(self):
+        from PIL import Image
 
-        def frame(t):
-            self.hover = start + (target - start) * t
-            self._draw()
+        r = self.radius
+        glows = []
+        for color in self.colors:
+            if self.dark:
+                glow = Image.new("RGB", (2 * r, 2 * r),
+                                 tuple(int(v) for v in color))
+                glow = Image.composite(
+                    glow, Image.new("RGB", (2 * r, 2 * r), (0, 0, 0)),
+                    self.falloff)
+                glow = glow.point(lambda v: int(v * self.INTENSITY))
+            else:
+                tint = tuple(int(255 - (255 - v) * 0.45) for v in color)
+                glow = Image.new("RGB", (2 * r, 2 * r), tint)
+                glow = Image.composite(
+                    glow, Image.new("RGB", (2 * r, 2 * r), (255, 255, 255)),
+                    self.falloff.point(lambda v: int(v * 0.78)))
+            glows.append(glow)
+        self._glows = glows
 
-        self.anim.run(110, frame)
+    def _position(self, index):
+        import math
 
-    def _press(self, _event=None):
-        self.pressed = True
+        ax, ay, period, phase = self.BLOBS[index]
+        cx = self.rw * 0.5 + self.rw * ax * math.sin(
+            2 * math.pi * self.t / period + phase)
+        cy = self.rh * 0.5 + self.rh * ay * math.cos(
+            2 * math.pi * self.t / (period * 0.8) + phase * 1.7)
+        return cx, cy
 
-    def _release(self, _event=None):
-        if not self.pressed:
-            return
-        self.pressed = False
-        if self.command:
-            self.command()
+    def frame(self, dt):
+        import math
 
-    def set_active(self, active):
-        self.active = bool(active)
-        self._draw()
+        from PIL import Image, ImageChops
+
+        self.t += dt
+        k = 1 - math.exp(-dt / self.FADE)
+        drift = 0.0
+        for i in range(3):
+            self.colors[i] = tuple(
+                self.colors[i][j] + (self.target[i][j] - self.colors[i][j]) * k
+                for j in range(3))
+            drift = max(drift, max(abs(self.colors[i][j] - self.target[i][j])
+                                   for j in range(3)))
+        self.base = tuple(
+            self.base[j] + (self.base_target[j] - self.base[j]) * k
+            for j in range(3))
+
+        if drift >= 0.6:
+            self._build()  # recolour the blobs every frame while fading
+        else:
+            self.colors = [tuple(color) for color in self.target]
+            self.base = tuple(self.base_target)
+            if self._glows is None:
+                self._build()
+
+        r = self.radius
+        pad = r
+        canvas = Image.new("RGB", (self.rw + 2 * pad, self.rh + 2 * pad),
+                           tuple(int(v) for v in self.base))
+        for i, glow in enumerate(self._glows):
+            cx, cy = self._position(i)
+            x = int(cx) + pad - r
+            y = int(cy) + pad - r
+            box = (x, y, x + 2 * r, y + 2 * r)
+            region = canvas.crop(box)
+            if self.dark:
+                canvas.paste(ImageChops.add(region, glow), (x, y))
+            else:
+                canvas.paste(ImageChops.multiply(region, glow), (x, y))
+
+        img = canvas.crop((pad, pad, pad + self.rw, pad + self.rh))
+        img = ImageChops.multiply(img, self.shade)
+        full = img.resize((self.w, self.h), Image.BILINEAR)
+        full.paste(self.border_layer, (0, 0), self.border_layer)
+        return Image.composite(full, self.key_img, self.mask)
 
 
 class NowPlayingWindow:
-    """Small "now playing" card for AirPlay audio sessions (Apple Music etc.)."""
+    """Small "now playing" card for AirPlay audio sessions (Apple Music etc.).
+
+    The card lives on a single canvas so the drifting, cover-tinted backdrop
+    can show through; Tk widgets would cover it with an opaque rectangle.
+    """
 
     WIDTH = 470
     ART = 104
-    RING = 14      # transparent margin that hosts the rounded card edge
-    MARGIN = 16    # distance from the work-area corner
+    RING = 14       # transparent margin that hosts the rounded card edge
+    MARGIN = 16     # distance from the work-area corner
     KEY = "#010203"  # colour key for real rounded corners
+    FRAME_MS = 83   # ~12 fps for the drifting backdrop
+    BTN = 26
+    PAD = 8
 
     def __init__(self, app):
         self.app = app
         self.win = None
+        self.shell = None
         self.track = {}
         self.track_key = None
         self.cover_key = None
+        self.palette_key = None
         self.photo = None
         self.dismissed_key = None
         self.visible = False
@@ -898,11 +1095,40 @@ class NowPlayingWindow:
         self._target_pos = 0.0
         self._duration = 0.0
         self.topmost = bool(load_settings().get("always_on_top", False))
+        self.animated = bool(load_settings().get("animated_backdrop", True))
         self._drag = None
+        self._press = None
+        self.hover = None
+        self.hover_t = 0.0
+        self._icon_anim = None
+        self._chips = {}
+        self._glyphs = {}
+        self._prog_photos = ()
+        self._tip_job = None
+        self._tip_top = None
+        self._tip_text = ""
+        self.backdrop = None
+        self._bg_item = None
+        self._bg_photo = None
+        self._bg_owned = False
+        self._anim_job = None
+        self._last_frame = 0.0
+        self.c = palette(system_is_dark())
+        self.dark = system_is_dark()
+        self.dim = self.c["muted"]
+        self._layout = {}
+        self._size = (self.WIDTH, 211)
+        self.card_w = self.WIDTH - 2 * self.RING
 
     # -- window ------------------------------------------------------------
     def _build(self):
-        c = palette(system_is_dark())
+        dark = system_is_dark()
+        c = palette(dark)
+        self.c = c
+        self.dark = dark
+        # secondary text sits on a colourful backdrop, so keep it brighter
+        # than the flat-card "muted" grey
+        self.dim = blend(c["muted"], c["fg"], 0.52)
         win = tk.Toplevel(self.app.root)
         self.win = win
         win.title(tr("player_title"))
@@ -928,90 +1154,345 @@ class NowPlayingWindow:
             except Exception:
                 pass
 
-        self.shell = tk.Canvas(win, bg=self.KEY, highlightthickness=0, bd=0)
+        self._measure()
+        cw, ch = self._size
+        self.shell = tk.Canvas(win, width=cw, height=ch, bg=self.KEY,
+                               highlightthickness=0, bd=0)
         self.shell.pack(fill="both", expand=True)
 
-        card = tk.Frame(self.shell, bg=c["card"], padx=6, pady=2)
-        self.card = card
+        if self.animated:
+            self.backdrop = PlayerBackdrop(cw, ch, 14, self.KEY, c["border"],
+                                           dark=dark)
+            self.palette_key = tuple(cover_palette())
+            self.backdrop.set_palette(self.palette_key, instant=True)
+        else:
+            self.backdrop = None
+        self._paint_background()
 
-        head = tk.Frame(card, bg=c["card"])
-        head.pack(fill="x")
-        self.lbl_head = tk.Label(
-            head, text=tr("now_playing"), bg=c["card"], fg=c["muted"],
-            font=("Segoe UI", 9), anchor="w",
-        )
-        self.lbl_head.pack(side="left", pady=(0, 2))
+        self.photo = cover_photo(self.ART) or placeholder_photo(self.ART)
+        self._cover_item = self.shell.create_image(
+            self.RING + self.PAD, self.RING + self._layout["art_y"],
+            anchor="nw", image=self.photo)
 
-        self.btn_close = MiniButton(head, c, "close", self._on_close)
-        self.btn_close.pack(side="right", padx=(2, 0))
-        self.btn_pin = MiniButton(head, c, "pin", self._toggle_topmost)
-        self.btn_pin.pack(side="right")
-        self.btn_pin.set_active(self.topmost)
-        self.tip_pin = Tooltip(self.btn_pin, tr("always_on_top"), c)
-        self.tip_close = Tooltip(self.btn_close, tr("close"), c)
+        lay = self._layout
+        self._head_item = self.shell.create_text(
+            self.RING + self.PAD, self.RING + 2 + self.BTN // 2, anchor="w",
+            text=tr("now_playing"), fill=self.dim, font=("Segoe UI", 9))
+        self._title_item = self.shell.create_text(
+            self.RING + lay["info_x"], self.RING + lay["title_y"], anchor="nw",
+            text="", fill=c["fg"], font=("Segoe UI", 12, "bold"))
+        self._artist_item = self.shell.create_text(
+            self.RING + lay["info_x"], self.RING + lay["artist_y"], anchor="nw",
+            text="", fill=c["fg"], font=("Segoe UI", 10))
+        self._album_item = self.shell.create_text(
+            self.RING + lay["info_x"], self.RING + lay["album_y"], anchor="nw",
+            text="", fill=self.dim, font=("Segoe UI", 9))
+        self._pos_item = self.shell.create_text(
+            self.RING + self.PAD, self.RING + lay["times_y"], anchor="nw",
+            text="0:00", fill=self.dim, font=("Segoe UI", 8))
+        self._dur_item = self.shell.create_text(
+            self.RING + self.card_w - self.PAD, self.RING + lay["times_y"],
+            anchor="ne", text="0:00", fill=self.dim, font=("Segoe UI", 8))
 
-        for widget in (head, self.lbl_head):
-            widget.bind("<ButtonPress-1>", self._drag_start)
-            widget.bind("<B1-Motion>", self._drag_move)
-            widget.bind("<ButtonRelease-1>", self._drag_end)
+        self._chips = self._make_chips()
+        self._draw_icons()
+        self._draw_progress()
 
-        row = tk.Frame(card, bg=c["card"])
-        row.pack(fill="x", pady=(6, 0))
-
-        self.art_label = tk.Label(row, bg=c["card"], bd=0, padx=0, pady=0)
-        self.art_label.pack(side="left", padx=(2, 14))
-        self.photo = placeholder_photo(self.ART)
-        if self.photo is not None:
-            self.art_label.configure(image=self.photo)
-
-        info = tk.Frame(row, bg=c["card"])
-        info.pack(side="left", fill="both", expand=True)
-
-        self.lbl_title = tk.Label(
-            info, text="", bg=c["card"], fg=c["fg"],
-            font=("Segoe UI", 12, "bold"), anchor="w", justify="left",
-        )
-        self.lbl_title.pack(anchor="w", fill="x")
-        self.lbl_artist = tk.Label(
-            info, text="", bg=c["card"], fg=c["fg"],
-            font=("Segoe UI", 10), anchor="w", justify="left",
-        )
-        self.lbl_artist.pack(anchor="w", fill="x", pady=(4, 0))
-        self.lbl_album = tk.Label(
-            info, text="", bg=c["card"], fg=c["muted"],
-            font=("Segoe UI", 9), anchor="w", justify="left",
-        )
-        self.lbl_album.pack(anchor="w", fill="x", pady=(2, 0))
-
-        self.bar = tk.Canvas(
-            card, height=6, bg=c["card"], highlightthickness=0, bd=0,
-        )
-        self.bar.pack(fill="x", pady=(14, 4), padx=2)
-        self.bar.bind("<Configure>", lambda _e: self._draw_progress())
-
-        times = tk.Frame(card, bg=c["card"])
-        times.pack(fill="x", padx=2)
-        self.lbl_pos = tk.Label(times, text="0:00", bg=c["card"], fg=c["muted"], font=("Segoe UI", 8))
-        self.lbl_pos.pack(side="left")
-        self.lbl_dur = tk.Label(times, text="0:00", bg=c["card"], fg=c["muted"], font=("Segoe UI", 8))
-        self.lbl_dur.pack(side="right")
-
-        # measure the content, then draw the rounded card behind it
-        card.update_idletasks()
-        inner_w = card.winfo_reqwidth()
-        inner_h = card.winfo_reqheight()
-        cw = max(inner_w + 2 * self.RING, self.WIDTH)
-        ch = inner_h + 2 * self.RING
-        self.shell.configure(width=cw, height=ch)
-        photo = rounded_photo(cw, ch, 14, c["card"], c["border"], 1, key=self.KEY)
-        self.shell.create_image(0, 0, anchor="nw", image=photo)
-        self.shell.image = photo
-        self.shell.create_window(self.RING, self.RING, anchor="nw", window=card,
-                                 width=cw - 2 * self.RING, height=ch - 2 * self.RING)
-        self._size = (cw, ch)
+        self.shell.bind("<ButtonPress-1>", self._press_evt)
+        self.shell.bind("<B1-Motion>", self._drag_move)
+        self.shell.bind("<ButtonRelease-1>", self._release_evt)
+        self.shell.bind("<Motion>", self._motion)
+        self.shell.bind("<Leave>", self._leave)
 
         win.update_idletasks()
         self.win_anim = Animator(win)
+
+    def _measure(self):
+        from tkinter import font as tkfont
+
+        def line(size, bold=False):
+            return tkfont.Font(family="Segoe UI", size=size,
+                               weight="bold" if bold else "normal").metrics("linespace")
+
+        head = line(9)
+        title = line(12, True)
+        artist = line(10)
+        album = line(9)
+        times = line(8)
+
+        card_w = max(self.WIDTH - 2 * self.RING, self.ART + 200)
+        art_y = max(self.BTN, head) + 8
+        info_x = self.PAD + self.ART + 14
+        artist_y = art_y + title + 4
+        album_y = artist_y + artist + 2
+        bar_y = max(art_y + self.ART, album_y + album) + 14
+        times_y = bar_y + 6 + 4
+        card_h = times_y + times + 2
+        close_x = card_w - 6 - self.BTN
+
+        self.card_w = card_w
+        self._layout = {
+            "art_y": art_y,
+            "info_x": info_x,
+            "title_y": art_y,
+            "artist_y": artist_y,
+            "album_y": album_y,
+            "bar_y": bar_y,
+            "bar_w": card_w - 2 * self.PAD,
+            "times_y": times_y,
+            "pin_x": close_x - 2 - self.BTN,
+            "close_x": close_x,
+        }
+        self._size = (card_w + 2 * self.RING, card_h + 2 * self.RING)
+
+    def _make_chips(self):
+        from PIL import Image, ImageDraw, ImageTk
+
+        size = self.BTN
+        s = 4
+        chips = {}
+        for name, color, alpha in (
+            ("hover", (255, 255, 255), 26),
+            ("active", (255, 255, 255), 56),
+            ("close", (232, 17, 35), 215),
+            # on the pastel light backdrop a white veil is invisible
+            ("hover_light", (0, 0, 0), 16),
+            ("active_light", (0, 0, 0), 34),
+        ):
+            img = Image.new("RGBA", (size * s, size * s), (0, 0, 0, 0))
+            ImageDraw.Draw(img).ellipse(
+                [0, 0, size * s - 1, size * s - 1], fill=color + (alpha,))
+            chips[name] = ImageTk.PhotoImage(
+                img.resize((size, size), Image.LANCZOS))
+        return chips
+
+    def _glyph(self, kind, color):
+        """Anti-aliased header glyph, drawn once per colour and centred exactly.
+
+        Canvas lines snap to whole pixels, so a hand-placed icon drifts by up
+        to a pixel inside its chip and the strokes look uneven.  Drawing the
+        sprite at 4x and scaling down keeps it optically centred and smooth.
+        """
+        key = (kind, color)
+        cached = self._glyphs.get(key)
+        if cached is not None:
+            return cached
+        from PIL import Image, ImageDraw, ImageTk
+
+        s = 4
+        n = self.BTN
+        sprite = Image.new("RGBA", (n * s, n * s), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(sprite)
+        rgb = _hex_to_rgb(color) + (255,)
+        mid = n * s / 2.0
+        if kind == "close":
+            half, width = 4.6 * s, 1.7 * s
+            for dx, dy in ((1, 1), (1, -1)):
+                draw.line([mid - dx * half, mid - dy * half,
+                           mid + dx * half, mid + dy * half],
+                          fill=rgb, width=int(round(width)))
+            r = width / 2.0
+            for dx, dy in ((-1, -1), (1, 1), (1, -1), (-1, 1)):
+                draw.ellipse([mid + dx * half - r, mid + dy * half - r,
+                              mid + dx * half + r, mid + dy * half + r],
+                             fill=rgb)
+        else:
+            # "always on top": a window with a title bar.  Equal strokes and a
+            # thin bar keep the ink balanced, so it reads as centred.
+            w, h = 14.0 * s, 12.0 * s
+            left, top = mid - w / 2, mid - h / 2
+            draw.rounded_rectangle([left, top, left + w - 1, top + h - 1],
+                                   radius=1.9 * s, outline=rgb,
+                                   width=int(round(1.5 * s)))
+            draw.line([left + 1.2 * s, top + 3.3 * s,
+                       left + w - 1.2 * s, top + 3.3 * s],
+                      fill=rgb, width=int(round(1.2 * s)))
+        photo = ImageTk.PhotoImage(sprite.resize((n, n), Image.LANCZOS))
+        self._glyphs[key] = photo
+        return photo
+
+    # -- background --------------------------------------------------------
+    def _paint_background(self):
+        """(Re)create the backdrop image; a fresh PhotoImage we may paste into."""
+        from PIL import ImageTk
+
+        if self.shell is None:
+            return
+        if self.backdrop is not None:
+            self._bg_photo = ImageTk.PhotoImage(self.backdrop.frame(0.0))
+            self._bg_owned = True
+        else:
+            cw, ch = self._size
+            self._bg_photo = rounded_photo(cw, ch, 14, self.c["card"],
+                                           self.c["border"], 1, key=self.KEY)
+            self._bg_owned = False
+        if self._bg_item is None:
+            self._bg_item = self.shell.create_image(0, 0, anchor="nw",
+                                                    image=self._bg_photo)
+            self.shell.tag_lower(self._bg_item)
+        else:
+            self.shell.itemconfigure(self._bg_item, image=self._bg_photo)
+
+    # -- icons -------------------------------------------------------------
+    def _draw_icons(self):
+        cv = self.shell
+        if cv is None:
+            return
+        c = self.c
+        lay = self._layout
+        cv.delete("icon")
+        for kind in ("pin", "close"):
+            x = self.RING + lay[f"{kind}_x"]
+            y = self.RING + 2
+            active = kind == "pin" and self.topmost
+            hovered = self.hover == kind
+            t = self.hover_t if hovered else 0.0
+            chip = None
+            if kind == "close" and t > 0.02:
+                chip = self._chips["close"]
+            elif active:
+                chip = self._chips["active" if self.dark else "active_light"]
+            elif t > 0.02:
+                chip = self._chips["hover" if self.dark else "hover_light"]
+            if chip is not None:
+                cv.create_image(x, y, anchor="nw", image=chip, tags="icon")
+            if kind == "close" and hovered:
+                color = "#ffffff"
+            elif active or hovered:
+                color = "#ffffff" if self.dark else c["fg"]
+            else:
+                color = self.dim
+            cv.create_image(x, y, anchor="nw", image=self._glyph(kind, color),
+                            tags="icon")
+
+    def _hit(self, x, y):
+        if not (self.RING + 2 <= y <= self.RING + 2 + self.BTN):
+            return None
+        for kind in ("pin", "close"):
+            left = self.RING + self._layout[f"{kind}_x"]
+            if left <= x <= left + self.BTN:
+                return kind
+        return None
+
+    def _set_hover(self, kind):
+        if kind == self.hover:
+            return
+        self.hover = kind
+        start = self.hover_t
+        target = 1.0 if kind else 0.0
+        if self._icon_anim is None:
+            self._icon_anim = Animator(self.shell)
+
+        def frame(t):
+            self.hover_t = start + (target - start) * t
+            self._draw_icons()
+
+        self._icon_anim.run(110, frame)
+
+    # -- tooltips ----------------------------------------------------------
+    def _cancel_tip(self):
+        job, self._tip_job = self._tip_job, None
+        if job is not None and self.shell is not None:
+            try:
+                self.shell.after_cancel(job)
+            except Exception:
+                pass
+        top, self._tip_top = self._tip_top, None
+        if top is not None:
+            try:
+                top.destroy()
+            except Exception:
+                pass
+
+    def _schedule_tip(self, kind):
+        self._cancel_tip()
+        text = tr("always_on_top") if kind == "pin" else tr("close")
+        self._tip_text = text
+        self._tip_job = self.shell.after(450, lambda: self._show_tip(kind, text))
+
+    def _show_tip(self, kind, text):
+        self._tip_job = None
+        if self.win is None or self.hover != kind:
+            return
+        try:
+            from tkinter import font as tkfont
+
+            width = tkfont.Font(family="Segoe UI", size=9).measure(text) + 20
+            height = 24
+            x = (self.win.winfo_rootx() + self.RING + self._layout[f"{kind}_x"]
+                 + self.BTN // 2 - width // 2)
+            y = self.win.winfo_rooty() + self.RING + 2 - height - 6
+            x = max(8, x)
+            key = "#010203"
+            top = tk.Toplevel(self.win)
+            self._tip_top = top
+            top.overrideredirect(True)
+            top.attributes("-topmost", True)
+            top.configure(bg=key)
+            try:
+                top.attributes("-transparentcolor", key)
+            except Exception:
+                pass
+            cv = tk.Canvas(top, width=width, height=height, bg=key,
+                           highlightthickness=0, bd=0)
+            cv.pack()
+            photo = rounded_photo(width, height, 7, self.c["card"],
+                                  self.c["border"], 1, key=key)
+            cv.create_image(0, 0, anchor="nw", image=photo)
+            cv.image = photo
+            cv.create_text(width / 2, height / 2, text=text, fill=self.c["fg"],
+                           font=("Segoe UI", 9))
+            top.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            self._cancel_tip()
+
+    # -- pointer -----------------------------------------------------------
+    def _motion(self, event):
+        kind = self._hit(event.x, event.y)
+        if kind != self.hover:
+            self._set_hover(kind)
+            if kind:
+                self._schedule_tip(kind)
+            else:
+                self._cancel_tip()
+        try:
+            if kind:
+                self.shell.configure(cursor="hand2")
+            else:
+                # the header is draggable, but a "move" cursor there just
+                # adds noise over the artwork
+                self.shell.configure(cursor="")
+        except Exception:
+            pass
+
+    def _leave(self, _event=None):
+        self._set_hover(None)
+        self._cancel_tip()
+        try:
+            self.shell.configure(cursor="")
+        except Exception:
+            pass
+
+    def _press_evt(self, event):
+        self._cancel_tip()
+        kind = self._hit(event.x, event.y)
+        if kind:
+            self._press = kind
+            return
+        if event.y < self.RING + 2 + self.BTN + 4:
+            try:
+                self._drag = (event.x_root - self.win.winfo_rootx(),
+                              event.y_root - self.win.winfo_rooty())
+            except Exception:
+                self._drag = None
+
+    def _release_evt(self, event):
+        kind, self._press = self._press, None
+        self._drag = None
+        if kind == "close":
+            self._on_close()
+        elif kind == "pin":
+            self._toggle_topmost()
 
     # -- geometry ----------------------------------------------------------
     @staticmethod
@@ -1044,30 +1525,12 @@ class NowPlayingWindow:
             return 0
 
     # -- dragging ----------------------------------------------------------
-    def _drag_start(self, event):
-        try:
-            self._drag = (event.x_root - self.win.winfo_rootx(),
-                          event.y_root - self.win.winfo_rooty())
-        except Exception:
-            self._drag = None
-
     def _drag_move(self, event):
         if self._drag is None:
             return
         dx, dy = self._drag
         try:
             self.win.geometry(f"+{event.x_root - dx}+{event.y_root - dy}")
-        except Exception:
-            pass
-
-    def _drag_end(self, _event=None):
-        if self._drag is None:
-            return
-        self._drag = None
-        try:
-            if self._home is not None:
-                w, h, _x, _y = self._home
-                self._home = (w, h, self.win.winfo_rootx(), self.win.winfo_rooty())
         except Exception:
             pass
 
@@ -1082,7 +1545,7 @@ class NowPlayingWindow:
 
     def _toggle_topmost(self):
         self.topmost = not self.topmost
-        self.btn_pin.set_active(self.topmost)
+        self._draw_icons()
         self._apply_topmost()
         cfg = load_settings()
         cfg["always_on_top"] = self.topmost
@@ -1091,6 +1554,65 @@ class NowPlayingWindow:
         except Exception:
             pass
 
+    # -- animation ---------------------------------------------------------
+    def _start_anim(self):
+        if not self.animated or self.backdrop is None or self.win is None:
+            return
+        if self._anim_job is not None:
+            return
+        self._last_frame = time.monotonic()
+        self._anim_job = self.win.after(self.FRAME_MS, self._anim_tick)
+
+    def _stop_anim(self):
+        job, self._anim_job = self._anim_job, None
+        if job is not None and self.win is not None:
+            try:
+                self.win.after_cancel(job)
+            except Exception:
+                pass
+
+    def _anim_tick(self):
+        self._anim_job = None
+        if (not self.visible or not self.animated or self.win is None
+                or not self.win.winfo_exists() or self.backdrop is None):
+            return
+        now = time.monotonic()
+        dt = min(0.25, max(0.001, now - self._last_frame))
+        self._last_frame = now
+        try:
+            img = self.backdrop.frame(dt)
+            if self._bg_owned and self._bg_photo is not None:
+                self._bg_photo.paste(img)
+            else:
+                from PIL import ImageTk
+
+                self._bg_photo = ImageTk.PhotoImage(img)
+                self._bg_owned = True
+                self.shell.itemconfigure(self._bg_item, image=self._bg_photo)
+        except Exception:
+            pass
+        if self.win is not None:
+            self._anim_job = self.win.after(self.FRAME_MS, self._anim_tick)
+
+    def apply_settings(self, cfg):
+        self.animated = bool(cfg.get("animated_backdrop", True))
+        if self.win is None or not self.win.winfo_exists():
+            return
+        if self.animated:
+            if self.backdrop is None:
+                cw, ch = self._size
+                self.backdrop = PlayerBackdrop(cw, ch, 14, self.KEY,
+                                               self.c["border"], dark=self.dark)
+                self.palette_key = tuple(cover_palette())
+                self.backdrop.set_palette(self.palette_key, instant=True)
+                self._paint_background()
+            self._start_anim()
+        else:
+            self._stop_anim()
+            self.backdrop = None
+            self._paint_background()
+
+    # -- reveal / hide -----------------------------------------------------
     def _reveal(self):
         """Show the card without stealing focus (and without raising it again)."""
         if self.win is None or not self.win.winfo_exists():
@@ -1117,6 +1639,7 @@ class NowPlayingWindow:
         else:
             self.win.deiconify()
         self.visible = True
+        self._start_anim()
         self._animate_in()
 
     def _animate_in(self):
@@ -1151,6 +1674,9 @@ class NowPlayingWindow:
             self.track = track
             self._shown_pos = 0.0
             self._apply_text(track)
+        else:
+            # UxPlay may write the artwork a moment after the tags
+            self._update_cover()
         self._set_progress(position, duration)
 
     def _apply_text(self, track):
@@ -1159,9 +1685,16 @@ class NowPlayingWindow:
         album = track.get("album") or ""
 
         # single-line labels keep the card size stable (no jumping on track change)
-        self.lbl_title.configure(text=ellipsize(title, ("Segoe UI", 12, "bold"), 300))
-        self.lbl_artist.configure(text=ellipsize(artist, ("Segoe UI", 10), 300) or " ")
-        self.lbl_album.configure(text=ellipsize(album, ("Segoe UI", 9), 300) or " ")
+        if self.shell is not None:
+            self.shell.itemconfigure(
+                self._title_item,
+                text=ellipsize(title, ("Segoe UI", 12, "bold"), 300))
+            self.shell.itemconfigure(
+                self._artist_item,
+                text=ellipsize(artist, ("Segoe UI", 10), 300) or " ")
+            self.shell.itemconfigure(
+                self._album_item,
+                text=ellipsize(album, ("Segoe UI", 9), 300) or " ")
         self.win.title(f"{title} — AirMirror")
 
         self._update_cover()
@@ -1172,10 +1705,8 @@ class NowPlayingWindow:
             return
         try:
             self.win.title(tr("player_title"))
-            self.lbl_head.configure(text=tr("now_playing"))
-            for tip, key in ((self.tip_pin, "always_on_top"), (self.tip_close, "close")):
-                tip._hide()
-                tip.text = tr(key)
+            self.shell.itemconfigure(self._head_item, text=tr("now_playing"))
+            self._cancel_tip()
             if self.track:
                 self._apply_text(self.track)
         except Exception:
@@ -1187,19 +1718,24 @@ class NowPlayingWindow:
         except OSError:
             size = 0
         key = (file_mtime(COVERART_FILE), size)
-        if key == self.cover_key and self.photo is not None:
-            return
-        photo = cover_photo(self.ART) or placeholder_photo(self.ART)
-        if photo is None:
-            return
-        self.cover_key = key
-        self.photo = photo
-        self.art_label.configure(image=photo)
+        if key != self.cover_key:
+            photo = cover_photo(self.ART) or placeholder_photo(self.ART)
+            if photo is not None:
+                self.cover_key = key
+                self.photo = photo
+                if self.shell is not None:
+                    self.shell.itemconfigure(self._cover_item, image=photo)
+        if self.backdrop is not None:
+            pal = tuple(cover_palette())
+            if pal != self.palette_key:
+                self.palette_key = pal
+                self.backdrop.set_palette(pal)
 
     def _set_progress(self, position, duration):
         self._target_pos = float(position)
         self._duration = float(duration)
-        self.lbl_dur.configure(text=_fmt_time(duration))
+        if self.shell is not None:
+            self.shell.itemconfigure(self._dur_item, text=_fmt_time(duration))
         if self._prog_job is None and self.visible and self.win is not None:
             self._prog_job = self.win.after(30, self._tick_progress)
 
@@ -1221,34 +1757,32 @@ class NowPlayingWindow:
         else:
             self._shown_pos += delta * 0.20
         self._draw_progress()
-        self.lbl_pos.configure(text=_fmt_time(self._shown_pos))
+        if self.shell is not None:
+            self.shell.itemconfigure(self._pos_item,
+                                     text=_fmt_time(self._shown_pos))
         if abs(self._target_pos - self._shown_pos) > 0.02:
             self._prog_job = self.win.after(30, self._tick_progress)
 
     def _draw_progress(self):
-        if self.bar is None:
+        if self.shell is None:
             return
-        self.bar.delete("all")
-        width = max(self.bar.winfo_width(), 1)
-        c = palette(system_is_dark())
-        h = 6
-        r = h / 2
-        track = c["border"]
-        self.bar.create_oval(0, 0, h, h, fill=track, outline="")
-        self.bar.create_oval(width - h, 0, width, h, fill=track, outline="")
-        self.bar.create_rectangle(r, 0, width - r, h, fill=track, outline="")
+        self.shell.delete("prog")
+        lay = self._layout
+        x0 = self.RING + self.PAD
+        y = self.RING + lay["bar_y"]
+        width = lay["bar_w"]
+        # keep the sprites referenced: the canvas only stores the image name
+        self._prog_photos = [bar_photo(width, self.c["border"])]
+        self.shell.create_image(x0, y, anchor="nw",
+                                image=self._prog_photos[0], tags="prog")
         if self._duration <= 0:
             return
         done = width * min(self._shown_pos / self._duration, 1.0)
-        if done < 1:
+        if done < 2:
             return
-        fill = c["muted"]
-        if done < h:
-            self.bar.create_oval(0, 0, max(done, 2), h, fill=fill, outline="")
-        else:
-            self.bar.create_oval(0, 0, h, h, fill=fill, outline="")
-            self.bar.create_oval(done - h, 0, done, h, fill=fill, outline="")
-            self.bar.create_rectangle(r, 0, done - r, h, fill=fill, outline="")
+        self._prog_photos.append(bar_photo(done, self.c["muted"]))
+        self.shell.create_image(x0, y, anchor="nw",
+                                image=self._prog_photos[1], tags="prog")
 
     # -- lifecycle ---------------------------------------------------------
     def hide(self):
@@ -1256,9 +1790,8 @@ class NowPlayingWindow:
             return
         self.visible = False
         self._stop_progress()
-        for tip in (getattr(self, "tip_pin", None), getattr(self, "tip_close", None)):
-            if tip is not None:
-                tip._hide()
+        self._stop_anim()
+        self._cancel_tip()
         win = self.win
         if win is None or not win.winfo_exists() or self._home is None:
             return
@@ -1288,11 +1821,12 @@ class NowPlayingWindow:
 
     def destroy(self):
         self._stop_progress()
+        self._stop_anim()
+        self._cancel_tip()
         if self.win_anim is not None:
             self.win_anim.cancel()
-        for tip in (getattr(self, "tip_pin", None), getattr(self, "tip_close", None)):
-            if tip is not None:
-                tip._hide()
+        if self._icon_anim is not None:
+            self._icon_anim.cancel()
         if self.win is not None:
             try:
                 self.win.destroy()
@@ -1368,6 +1902,7 @@ def round_poly(canvas, x1, y1, x2, y2, r, **kw):
 
 
 _ROUND_CACHE = {}
+_BAR_CACHE = {}
 
 
 def rounded_photo(w, h, radius, fill, outline=None, border=1, key=None):
@@ -1420,6 +1955,33 @@ def rounded_photo(w, h, radius, fill, outline=None, border=1, key=None):
     _ROUND_CACHE[cache_key] = photo
     return photo
 
+
+
+def bar_photo(width, color, height=6):
+    """Pill-shaped progress-bar sprite.
+
+    Tk's own ovals at this size break into stair-steps and leave a stray pixel
+    under each cap, so the bar is rendered like the rest of the chrome.
+    """
+    from PIL import Image, ImageDraw, ImageTk
+
+    width = max(1, int(round(width)))
+    key = (width, height, color)
+    photo = _BAR_CACHE.get(key)
+    if photo is not None:
+        return photo
+    s = 4
+    img = Image.new("RGBA", (width * s, height * s), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rounded_rectangle(
+        [0, 0, width * s - 1, height * s - 1],
+        radius=min(width, height) * s / 2.0,
+        fill=_hex_to_rgb(color) + (255,),
+    )
+    photo = ImageTk.PhotoImage(img.resize((width, height), Image.BOX))
+    if len(_BAR_CACHE) > 64:
+        _BAR_CACHE.clear()
+    _BAR_CACHE[key] = photo
+    return photo
 
 
 class PillToggle(tk.Canvas):
@@ -1861,7 +2423,8 @@ class SettingsWindow:
         self.c = palette(system_is_dark())
         self.win = None
         self.body = None
-        self._toggle_keys = ("now_playing", "sync", "audio", "fullscreen")
+        self._toggle_keys = ("now_playing", "animated_backdrop", "sync", "audio",
+                             "fullscreen")
         self.state = {
             key: bool(self.cfg.get(key, DEFAULTS.get(key, False)))
             for key in self._toggle_keys
@@ -2114,6 +2677,8 @@ class SettingsWindow:
         holder, card = self._card(body)
         self._toggle_row(card, "now_playing", tr("now_playing_title"),
                          tr("now_playing_hint"))
+        self._toggle_row(card, "animated_backdrop", tr("animated_backdrop_title"),
+                         tr("animated_backdrop_hint"))
         self._toggle_row(card, "sync", tr("sync_title"),
                          tr("sync_hint"))
         self._toggle_row(card, "audio", tr("audio_title"),
@@ -2389,6 +2954,7 @@ class AirMirrorApp:
             self._rebuild_menu()
             self.now_playing.retranslate()
         self.now_playing.reset()
+        self.now_playing.apply_settings(cfg)
         self.now_playing.hide()
         if restart:
             self.server.start(cfg)
